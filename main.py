@@ -6,6 +6,7 @@ Automated Football Highlight Video System
 - Generates a custom thumbnail (team logos + result + real match image)
 - Builds a video (intro + highlights + audio narration)
 - Uploads to YouTube automatically
+- Filters to priority teams and competitions only
 """
 
 import os
@@ -13,7 +14,6 @@ import sys
 import requests
 import json
 import time
-import re
 from datetime import datetime
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
@@ -71,11 +71,24 @@ def debug_print(msg):
 def fetch_finished_matches():
     """
     Fetch finished matches from Football-Data.org for all tracked competitions.
-    Returns a list of matches that have not yet been posted.
+    Returns a list of matches that have not yet been posted and match priority filters.
     """
     headers = {"X-Auth-Token": FOOTBALL_API_KEY}
     posted_response = supabase.table("highlights_matches").select("fixture_id").eq("posted", 1).execute()
     posted_ids = [row["fixture_id"] for row in posted_response.data]
+
+    # Priority teams and competitions
+    PRIORITY_TEAMS = [
+        "Arsenal", "Liverpool", "Manchester United", "Manchester City",
+        "Chelsea", "Tottenham", "Newcastle", "Aston Villa",
+        "Real Madrid", "Barcelona", "Atletico Madrid",
+        "Bayern Munich", "Borussia Dortmund", "RB Leipzig",
+        "Paris Saint-Germain", "Marseille",
+        "AC Milan", "Inter Milan", "Juventus",
+        "PSV", "Ajax", "Feyenoord",
+        "Celtic", "Rangers"
+    ]
+    PRIORITY_COMPETITIONS = ["PL", "PD", "BL1", "CL", "FAC"]
 
     competitions = [
         {"id": "PL", "name": "Premier League"},
@@ -91,6 +104,12 @@ def fetch_finished_matches():
     for comp in competitions:
         comp_id = comp["id"]
         comp_name = comp["name"]
+
+        # Skip non-priority competitions
+        if comp_id not in PRIORITY_COMPETITIONS:
+            debug_print(f"Skipping {comp_name} – competition not in priority list")
+            continue
+
         debug_print(f"Fetching {comp_name} ({comp_id})")
         url = f"https://api.football-data.org/v4/competitions/{comp_id}/matches"
         try:
@@ -109,6 +128,11 @@ def fetch_finished_matches():
             status = match["status"]
             home_score = match["score"]["fullTime"]["home"] or 0
             away_score = match["score"]["fullTime"]["away"] or 0
+
+            # Filter by priority teams
+            if home not in PRIORITY_TEAMS and away not in PRIORITY_TEAMS:
+                debug_print(f"Skipping {home} vs {away} – neither team is in priority list")
+                continue
 
             if fixture_id in posted_ids:
                 continue
