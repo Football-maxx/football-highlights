@@ -16,7 +16,7 @@ import requests
 import json
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
 from google.oauth2.credentials import Credentials
@@ -70,7 +70,6 @@ def debug_print(msg):
 
 def sanitize_filename(name):
     """Remove invalid characters from a string to make it safe for a filename."""
-    # Replace slashes, colons, spaces, etc. with underscores
     return re.sub(r'[\\/*?:"<>|/]', '_', name).strip()
 
 
@@ -104,7 +103,7 @@ def fetch_finished_matches():
     ]
 
     matches_to_process = []
-    cutoff_time = datetime.utcnow() - timedelta(hours=24)  # only last 24 hours
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
 
     for comp in competitions:
         comp_id = comp["id"]
@@ -115,7 +114,7 @@ def fetch_finished_matches():
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
-            time.sleep(6)  # respect rate limit
+            time.sleep(6)
         except requests.exceptions.HTTPError as e:
             if response.status_code == 403:
                 debug_print(f"Skipping {comp_name} – not available on free tier (403)")
@@ -135,9 +134,10 @@ def fetch_finished_matches():
             away_score = match["score"]["fullTime"]["away"] or 0
             match_date_str = match["utcDate"]
             try:
+                # Parse ISO 8601 string to timezone-aware datetime (UTC)
                 match_date = datetime.fromisoformat(match_date_str.replace("Z", "+00:00"))
             except:
-                match_date = datetime.utcnow()  # fallback
+                match_date = datetime.now(timezone.utc)
 
             # Skip matches older than 24 hours
             if match_date < cutoff_time:
@@ -238,7 +238,6 @@ def fetch_match_image(home, away):
 
 
 def generate_thumbnail(home, away, home_score, away_score, image_path):
-    # Sanitize team names for filename
     safe_home = sanitize_filename(home)
     safe_away = sanitize_filename(away)
     output_path = f"thumbnail_{safe_home}_{safe_away}.jpg"
