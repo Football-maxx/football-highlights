@@ -103,7 +103,7 @@ def fetch_finished_matches():
     ]
 
     matches_to_process = []
-    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=48)
 
     for comp in competitions:
         comp_id = comp["id"]
