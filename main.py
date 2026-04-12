@@ -7,6 +7,7 @@ Automated Football Highlight Video System
 - Builds a video (intro + highlights + audio narration)
 - Uploads to YouTube automatically
 - Filters to priority teams and competitions only
+- Only processes matches from the last 24 hours
 """
 
 import os
@@ -14,7 +15,8 @@ import sys
 import requests
 import json
 import time
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
 from google.oauth2.credentials import Credentials
@@ -41,14 +43,12 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 # OpenAI client (optional, for AI metadata)
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# Competition → intro video mapping
+# Competition → intro video mapping (only competitions available on free tier)
 COMPETITION_INTROS = {
     "PL": "assets/intros/premier_league.mp4",
     "PD": "assets/intros/laliga.mp4",
     "BL1": "assets/intros/bundesliga.mp4",
     "CL": "assets/intros/champions_league.mp4",
-    "FAC": "assets/intros/premier_league.mp4",   # fallback
-    "ELC": "assets/intros/premier_league.mp4",   # fallback
 }
 
 # Initialize Supabase
@@ -68,16 +68,22 @@ def debug_print(msg):
         f.flush()
 
 
+def sanitize_filename(name):
+    """Remove invalid characters from a string to make it safe for a filename."""
+    # Replace slashes, colons, spaces, etc. with underscores
+    return re.sub(r'[\\/*?:"<>|/]', '_', name).strip()
+
+
 def fetch_finished_matches():
     """
     Fetch finished matches from Football-Data.org for all tracked competitions.
-    Returns a list of matches that have not yet been posted and match priority filters.
+    Returns a list of matches that have not yet been posted and are from the last 24 hours.
     """
     headers = {"X-Auth-Token": FOOTBALL_API_KEY}
     posted_response = supabase.table("highlights_matches").select("fixture_id").eq("posted", 1).execute()
     posted_ids = [row["fixture_id"] for row in posted_response.data]
 
-    # Priority teams and competitions
+    # Priority teams
     PRIORITY_TEAMS = [
         "Arsenal", "Liverpool", "Manchester United", "Manchester City",
         "Chelsea", "Tottenham", "Newcastle", "Aston Villa",
@@ -88,35 +94,34 @@ def fetch_finished_matches():
         "PSV", "Ajax", "Feyenoord",
         "Celtic", "Rangers"
     ]
-    PRIORITY_COMPETITIONS = ["PL", "PD", "BL1", "CL", "FAC"]
 
+    # Only competitions available on free tier
     competitions = [
         {"id": "PL", "name": "Premier League"},
         {"id": "PD", "name": "LaLiga"},
         {"id": "BL1", "name": "Bundesliga"},
         {"id": "CL", "name": "Champions League"},
-        {"id": "FAC", "name": "FA Cup"},
-        {"id": "ELC", "name": "Carabao Cup"},
     ]
 
     matches_to_process = []
+    cutoff_time = datetime.utcnow() - timedelta(hours=24)  # only last 24 hours
 
     for comp in competitions:
         comp_id = comp["id"]
         comp_name = comp["name"]
-
-        # Skip non-priority competitions
-        if comp_id not in PRIORITY_COMPETITIONS:
-            debug_print(f"Skipping {comp_name} – competition not in priority list")
-            continue
-
         debug_print(f"Fetching {comp_name} ({comp_id})")
         url = f"https://api.football-data.org/v4/competitions/{comp_id}/matches"
         try:
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
-            time.sleep(6)          # respect rate limit
+            time.sleep(6)  # respect rate limit
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 403:
+                debug_print(f"Skipping {comp_name} – not available on free tier (403)")
+            else:
+                debug_print(f"HTTP error fetching {comp_name}: {e}")
+            continue
         except Exception as e:
             debug_print(f"Error fetching {comp_name}: {e}")
             continue
@@ -128,6 +133,16 @@ def fetch_finished_matches():
             status = match["status"]
             home_score = match["score"]["fullTime"]["home"] or 0
             away_score = match["score"]["fullTime"]["away"] or 0
+            match_date_str = match["utcDate"]
+            try:
+                match_date = datetime.fromisoformat(match_date_str.replace("Z", "+00:00"))
+            except:
+                match_date = datetime.utcnow()  # fallback
+
+            # Skip matches older than 24 hours
+            if match_date < cutoff_time:
+                debug_print(f"Skipping old match: {home} vs {away} ({match_date})")
+                continue
 
             # Filter by priority teams
             if home not in PRIORITY_TEAMS and away not in PRIORITY_TEAMS:
@@ -142,7 +157,7 @@ def fetch_finished_matches():
                 "fixture_id": fixture_id,
                 "home_team": home,
                 "away_team": away,
-                "match_date": match["utcDate"],
+                "match_date": match_date_str,
                 "status": status,
                 "home_score": home_score,
                 "away_score": away_score,
@@ -159,12 +174,8 @@ def fetch_finished_matches():
 
 
 def get_highlights_from_scorebat(home, away):
-    """
-    Query the free Scorebat API for video highlights of a given match.
-    Returns the first video embed URL or None.
-    """
+    """Query the free Scorebat API for video highlights."""
     try:
-        # Use the public feed (no authentication required)
         url = "https://www.scorebat.com/video-api/v1/"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -173,19 +184,16 @@ def get_highlights_from_scorebat(home, away):
         debug_print(f"Scorebat API request failed: {e}")
         return None
 
-    # Search for the match in the feed
     for entry in data:
-        if "warning" in entry:   # skip the deprecation warning entries
+        if "warning" in entry:
             continue
         title = entry.get("title", "")
         side1 = entry.get("side1", {}).get("name", "")
         side2 = entry.get("side2", {}).get("name", "")
         if home in (title, side1, side2) and away in (title, side1, side2):
-            # Extract embed URL from the first video
             videos = entry.get("videos", [])
             if videos:
                 embed_code = videos[0].get("embed", "")
-                # Parse the embed code to get the actual video source
                 soup = BeautifulSoup(embed_code, "html.parser")
                 iframe = soup.find("iframe")
                 if iframe and iframe.get("src"):
@@ -197,7 +205,6 @@ def get_highlights_from_scorebat(home, away):
 
 
 def download_video(url, output_path):
-    """Download a video from a given URL."""
     try:
         response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
@@ -212,7 +219,6 @@ def download_video(url, output_path):
 
 
 def fetch_match_image(home, away):
-    """Try to fetch a real match image from GNews; fallback to generic stadium."""
     try:
         gn = GNews(language="en", country="US", max_results=1)
         query = f"{home} vs {away} football match"
@@ -221,7 +227,7 @@ def fetch_match_image(home, away):
             img_url = articles[0]["image"]
             response = requests.get(img_url, timeout=10)
             if response.status_code == 200:
-                img_path = f"temp_match_{home}_{away}.jpg"
+                img_path = f"temp_match_{sanitize_filename(home)}_{sanitize_filename(away)}.jpg"
                 with open(img_path, "wb") as f:
                     f.write(response.content)
                 debug_print(f"Downloaded match image from GNews: {img_url}")
@@ -232,29 +238,32 @@ def fetch_match_image(home, away):
 
 
 def generate_thumbnail(home, away, home_score, away_score, image_path):
-    """
-    Create a 1280x720 thumbnail with:
-    - Team logos (left and right)
-    - Match result (centered)
-    - A real match image (bottom 2/3)
-    """
-    # Load background
-    background = Image.open("assets/background.png").convert("RGB")
-    background = background.resize((1280, 720))
+    # Sanitize team names for filename
+    safe_home = sanitize_filename(home)
+    safe_away = sanitize_filename(away)
+    output_path = f"thumbnail_{safe_home}_{safe_away}.jpg"
+
+    try:
+        background = Image.open("assets/background.png").convert("RGB")
+        background = background.resize((1280, 720))
+    except Exception as e:
+        debug_print(f"Could not load background: {e}")
+        return None
 
     # Load logos (if available)
     home_logo_path = f"assets/logos/{home}.png"
     away_logo_path = f"assets/logos/{away}.png"
+    home_logo = None
+    away_logo = None
     try:
         home_logo = Image.open(home_logo_path).convert("RGBA").resize((150, 150))
     except:
-        home_logo = None
+        pass
     try:
         away_logo = Image.open(away_logo_path).convert("RGBA").resize((150, 150))
     except:
-        away_logo = None
+        pass
 
-    # Paste logos
     if home_logo:
         background.paste(home_logo, (80, 250), home_logo)
     if away_logo:
@@ -271,22 +280,24 @@ def generate_thumbnail(home, away, home_score, away_score, image_path):
     tw = bbox[2] - bbox[0]
     draw.text(((1280 - tw) // 2, 380), score_text, fill="white", font=font, stroke_width=2, stroke_fill="black")
 
-    # Paste match image (bottom area)
+    # Paste match image
     try:
-        match_img = Image.open(image_path).convert("RGB")
-        match_img.thumbnail((1280, 400))
-        x = (1280 - match_img.width) // 2
-        background.paste(match_img, (x, 480))
+        if image_path and os.path.exists(image_path):
+            match_img = Image.open(image_path).convert("RGB")
+            match_img.thumbnail((1280, 400))
+            x = (1280 - match_img.width) // 2
+            background.paste(match_img, (x, 480))
+        else:
+            debug_print("Match image not available, using blank area")
     except Exception as e:
         debug_print(f"Could not paste match image: {e}")
 
-    output_path = f"thumbnail_{home}_{away}.jpg"
     background.save(output_path)
+    debug_print(f"Thumbnail saved: {output_path}")
     return output_path
 
 
 def get_match_goals(fixture_id):
-    """Fetch goal scorers from Football-Data.org."""
     url = f"https://api.football-data.org/v4/matches/{fixture_id}"
     headers = {"X-Auth-Token": FOOTBALL_API_KEY}
     try:
@@ -304,7 +315,6 @@ def get_match_goals(fixture_id):
 
 
 def generate_audio_script(home, away, home_score, away_score, goals):
-    """Create a short narration script."""
     script = f"Here are the highlights from the match between {home} and {away}. "
     script += f"The final score was {home_score} to {away_score}. "
     if goals:
@@ -318,7 +328,6 @@ def generate_audio_script(home, away, home_score, away_score, goals):
 
 
 def text_to_speech(text, filename):
-    """Convert text to speech using Voice RSS."""
     url = f"http://api.voicerss.org/?key={VOICERSS_API_KEY}&hl=en-gb&src={text}&f=44khz_16bit_stereo"
     try:
         response = requests.get(url, timeout=30)
@@ -326,7 +335,6 @@ def text_to_speech(text, filename):
         with open(filename, "wb") as f:
             f.write(response.content)
         debug_print(f"Audio saved to {filename}")
-        # Validate audio
         test = AudioFileClip(filename)
         test.close()
     except Exception as e:
@@ -335,7 +343,6 @@ def text_to_speech(text, filename):
 
 
 def build_video(intro_path, highlight_path, audio_path, output_path):
-    """Concatenate intro + highlight clip, add audio, and export."""
     if not os.path.exists(intro_path):
         debug_print(f"Intro video not found: {intro_path}")
         return
@@ -343,7 +350,6 @@ def build_video(intro_path, highlight_path, audio_path, output_path):
     clips = [intro]
     if highlight_path and os.path.exists(highlight_path):
         highlight = VideoFileClip(highlight_path)
-        # Trim highlight to max 20 seconds (total video stays short)
         if highlight.duration > 20:
             highlight = highlight.subclipped(0, 20)
         clips.append(highlight)
@@ -362,7 +368,6 @@ def build_video(intro_path, highlight_path, audio_path, output_path):
 
 
 def upload_to_youtube(video_file, title, description, tags, thumbnail_path):
-    """Upload the final video and set its thumbnail."""
     if DRY_RUN:
         debug_print(f"DRY RUN: Would upload '{title}'")
         return
@@ -399,20 +404,22 @@ def upload_to_youtube(video_file, title, description, tags, thumbnail_path):
         response = request.execute()
         video_id = response["id"]
         debug_print(f"Upload successful! Video ID: {video_id}")
-        # Set thumbnail
-        youtube.thumbnails().set(videoId=video_id, media_body=thumbnail_path).execute()
-        debug_print("Thumbnail uploaded.")
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            youtube.thumbnails().set(videoId=video_id, media_body=thumbnail_path).execute()
+            debug_print("Thumbnail uploaded.")
     except Exception as e:
         debug_print(f"Upload failed: {e}")
 
 
 def process_match(fixture_id, home, away, home_score, away_score, comp_id):
-    """Process a single finished match from start to finish."""
     debug_print(f"Processing match: {home} vs {away} (fixture {fixture_id})")
     # 1. Fetch a real match image
     match_image = fetch_match_image(home, away)
-    # 2. Generate thumbnail
+    # 2. Generate thumbnail (skip if filename invalid)
     thumb_path = generate_thumbnail(home, away, home_score, away_score, match_image)
+    if not thumb_path:
+        debug_print("Skipping match due to thumbnail generation error")
+        return
     # 3. Fetch goals and create audio narration
     goals = get_match_goals(fixture_id)
     script = generate_audio_script(home, away, home_score, away_score, goals)
@@ -431,7 +438,6 @@ def process_match(fixture_id, home, away, home_score, away_score, comp_id):
     build_video(intro_path, highlight_path, audio_file, output_video)
     # 6. Prepare YouTube metadata
     if openai_client:
-        # AI‑generated title/description (optional)
         title = f"{home} {home_score} – {away_score} {away} | Highlights"
         description = f"Highlights of {home} vs {away}. Goals: {', '.join([g['player'] for g in goals])}"
         tags = ["Football", "Highlights", home.replace(" ", ""), away.replace(" ", "")]
@@ -455,7 +461,6 @@ def main():
         matches = fetch_finished_matches()
         for (fixture_id, home, away, home_score, away_score, comp_id) in matches:
             process_match(fixture_id, home, away, home_score, away_score, comp_id)
-            # Mark as posted in Supabase
             supabase.table("highlights_matches").update({"posted": 1}).eq("fixture_id", fixture_id).execute()
     except Exception as e:
         debug_print(f"FATAL ERROR: {e}")
