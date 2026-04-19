@@ -225,7 +225,8 @@ def generate_audio_script(home, away, home_score, away_score, goals):
             script += f"{g['player']} in the {g['minute']}th minute"
         script += ". "
     else:
-        script += "No goals were scored. "
+        # Avoid saying "No goals were scored" when we simply don't have data
+        script += " "
     script += "Thanks for watching!"
     debug_print(f"Generated script: {script}")
     return script
@@ -245,17 +246,10 @@ def text_to_speech(text, filename):
         os.system(f"ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 10 -q:a 9 -acodec libmp3lame -y {filename}")
 
 def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matchday=None):
-    """
-    Create a thumbnail like the example:
-    - Left 1/3: Team logos stacked vertically, score in middle
-    - Right 2/3: Frame from video with "HIGHLIGHTS" and matchday text overlay
-    """
     width, height = 1280, 720
-    # Create a base dark background
     thumbnail = Image.new("RGB", (width, height), color=(20, 20, 30))
     draw = ImageDraw.Draw(thumbnail)
 
-    # ---- Left 1/3 (0-426) ----
     left_width = 426
     # Load logos
     home_logo_path = f"assets/logos/{home}.png"
@@ -269,7 +263,6 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
     except:
         away_logo = None
 
-    # Paste logos (centered horizontally in left section)
     if home_logo:
         x_home = (left_width - home_logo.width) // 2
         thumbnail.paste(home_logo, (x_home, 140), home_logo)
@@ -277,7 +270,6 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
         x_away = (left_width - away_logo.width) // 2
         thumbnail.paste(away_logo, (x_away, 380), away_logo)
 
-    # Draw score in the middle of left section
     try:
         font = ImageFont.truetype("arial.ttf", 100)
     except:
@@ -290,16 +282,13 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
     score_y = 320 - th//2
     draw.text((score_x, score_y), score_text, fill="yellow", font=font, stroke_width=3, stroke_fill="black")
 
-    # ---- Right 2/3 (427-1280) ----
     right_width = width - left_width
     right_start = left_width
 
-    # Extract a frame from the video clip
     if video_clip_path and os.path.exists(video_clip_path):
         try:
             from moviepy import VideoFileClip
             clip = VideoFileClip(video_clip_path)
-            # Get a frame at 20% into the video (to avoid black frames)
             frame_time = min(clip.duration * 0.2, clip.duration - 0.1)
             frame = clip.get_frame(frame_time)
             frame_img = Image.fromarray(frame)
@@ -308,17 +297,14 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
             clip.close()
         except Exception as e:
             debug_print(f"Could not extract video frame: {e}")
-            # Fallback: gradient
             for i in range(right_width):
                 color = (40 + i//5, 40 + i//5, 60 + i//5)
                 draw.line([(right_start + i, 0), (right_start + i, height)], fill=color)
     else:
-        # No video – use gradient
         for i in range(right_width):
             color = (40 + i//5, 40 + i//5, 60 + i//5)
             draw.line([(right_start + i, 0), (right_start + i, height)], fill=color)
 
-    # Overlay text "HIGHLIGHTS" and matchday on the right side
     try:
         highlight_font = ImageFont.truetype("arial.ttf", 80)
         small_font = ImageFont.truetype("arial.ttf", 40)
@@ -326,7 +312,6 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
         highlight_font = ImageFont.load_default()
         small_font = ImageFont.load_default()
 
-    # "HIGHLIGHTS" text at top right
     highlights_text = "HIGHLIGHTS"
     bbox = draw.textbbox((0, 0), highlights_text, font=highlight_font)
     tw = bbox[2] - bbox[0]
@@ -334,7 +319,6 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
     text_y = 100
     draw.text((text_x, text_y), highlights_text, fill="white", font=highlight_font, stroke_width=2, stroke_fill="black")
 
-    # Matchday info (if available, else use competition)
     if not matchday:
         matchday = "MATCHDAY"
     matchday_text = matchday.upper()
@@ -344,7 +328,6 @@ def generate_thumbnail(home, away, home_score, away_score, video_clip_path, matc
     text_y = height - 80
     draw.text((text_x, text_y), matchday_text, fill="yellow", font=small_font, stroke_width=1, stroke_fill="black")
 
-    # Optional: add a small timestamp (like 1:10) – we can use video duration
     if video_clip_path and os.path.exists(video_clip_path):
         try:
             from moviepy import VideoFileClip
@@ -394,7 +377,7 @@ def build_video(intro_path, highlight_path, audio_path, output_path):
     )
     debug_print(f"Video saved to {output_path}")
 
-def upload_to_youtube(video_file, title, description, tags, thumbnail_path):
+def upload_to_youtube(video_file, title, description, tags, thumbnail_path, home, away, home_score, away_score):
     if DRY_RUN:
         debug_print(f"DRY RUN: Would upload '{title}'")
         return
@@ -469,7 +452,6 @@ def upload_to_youtube(video_file, title, description, tags, thumbnail_path):
 def process_match(fixture_id, home, away, home_score, away_score, comp_id):
     debug_print(f"Processing match: {home} vs {away} (fixture {fixture_id})")
 
-    # Get video highlights
     highlight_url = get_highlights_from_scorebat(home, away)
     highlight_path = None
     if highlight_url:
@@ -477,24 +459,20 @@ def process_match(fixture_id, home, away, home_score, away_score, comp_id):
         if not download_video(highlight_url, highlight_path):
             highlight_path = None
 
-    # Generate thumbnail using the video clip
     thumb_path = generate_thumbnail(home, away, home_score, away_score, highlight_path, matchday="MATCHDAY")
     if not thumb_path:
         debug_print("Skipping match due to thumbnail generation error")
         return
 
-    # Fetch goals and create audio narration
     goals = get_match_goals(fixture_id)
     script = generate_audio_script(home, away, home_score, away_score, goals)
     audio_file = f"audio_{fixture_id}.mp3"
     text_to_speech(script, audio_file)
 
-    # Build final video
     intro_path = COMPETITION_INTROS.get(comp_id, "assets/intros/premier_league.mp4")
     output_video = f"final_{fixture_id}.mp4"
     build_video(intro_path, highlight_path, audio_file, output_video)
 
-    # Prepare YouTube metadata
     if openai_client:
         title = f"{home} {home_score} – {away_score} {away} | Highlights"
         description = f"Highlights of {home} vs {away}. Goals: {', '.join([g['player'] for g in goals])}"
@@ -504,10 +482,8 @@ def process_match(fixture_id, home, away, home_score, away_score, comp_id):
         description = f"Highlights of {home} vs {away}. #Football #Highlights"
         tags = ["Football", "Highlights"]
 
-    # Upload to YouTube (pass home, away, home_score, away_score for description)
-    upload_to_youtube(output_video, title, description, tags, thumb_path)
+    upload_to_youtube(output_video, title, description, tags, thumb_path, home, away, home_score, away_score)
 
-    # Cleanup
     for f in [audio_file, output_video, thumb_path, highlight_path]:
         if f and os.path.exists(f) and f not in ["assets/generic_stadium.jpg", "assets/placeholder_thumbnail.jpg"]:
             os.remove(f)
