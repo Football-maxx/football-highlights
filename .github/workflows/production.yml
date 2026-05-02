@@ -11,14 +11,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick fonts-dejavu-core
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
       - name: Run main script
         env:
           FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
@@ -29,9 +33,13 @@ jobs:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
+          GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
         run: python main.py
+
       - name: Upload final video artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
-          path: final_*.mp4
+          name: debug-log
+          path: debug.log
